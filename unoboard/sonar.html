@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Arduino Sonar Scanner</title>
+<style>
+  :root { --bg:#0b1320; --grid:#1f2a44; --sweep:#6fffe9; --blip:#00e676; --txt:#d7e1f3; }
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Segoe UI,Roboto,Arial}
+  #wrap{display:flex;flex-direction:column;align-items:center;gap:12px;padding:14px}
+  canvas{width:min(90vw,90vh);height:min(90vw,90vh);display:block}
+  button{background:#1a73e8;border:0;border-radius:8px;color:#fff;padding:10px 14px;font-size:15px;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  #hud{display:flex;gap:18px;flex-wrap:wrap;align-items:center;justify-content:center;font-size:14px}
+  #range{width:160px}
+  .pill{padding:6px 10px;border:1px solid #2c3f66;border-radius:999px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h2>Sonar Scanner</h2>
+  <div id="hud">
+    <button id="connectBtn">Connect</button>
+    <span class="pill">Status: <span id="status">disconnected</span></span>
+    <span class="pill">Angle: <span id="angle">–</span>°</span>
+    <span class="pill">Distance: <span id="dist">–</span> cm</span>
+    <label class="pill">Max range (cm)
+      <input id="range" type="number" min="20" max="1000" step="10" value="400">
+    </label>
+  </div>
+  <canvas id="c" width="900" height="900"></canvas>
+  <p style="opacity:.8;font-size:13px">Tip: Chrome/Edge required (Web Serial). Use 115200 baud in your sketch.</p>
+</div>
+
+<script>
+const baudRate = 115200;                   // must match Serial.begin()
+const headerPrefix = "angle_deg,distance_cm";
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const angleEl  = document.getElementById('angle');
+const distEl   = document.getElementById('dist');
+const rangeEl  = document.getElementById('range');
+const connectBtn = document.getElementById('connectBtn');
+
+let port, reader, keepReading = false;
+let currentAngle = null, currentDistance = null;
+let blips = []; // {angleRad, rPx, time}
+const BLIP_FADE_MS = 1800;
+
+function polarToXY(cx, cy, r, theta){
+  return [cx + r * Math.cos(theta), cy - r * Math.sin(theta)]; // y up
+}
+
+function draw(){
+  const w = canvas.width, h = canvas.height;
+  const cx = w/2, cy = h/2;
+  const maxR = Math.min(w,h)/2 * 0.92;
+
+  // background
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg');
+  ctx.fillRect(0,0,w,h);
+
+  // grid circles
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid');
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  for(let i=1;i<=4;i++){
+    ctx.beginPath();
+    ctx.arc(cx,cy,(maxR*i)/4,0,Math.PI*2);
+    ctx.stroke();
+  }
+
+// spokes every 30°  (include 180° for the left flat line)
+for (let deg = 0; deg <= 180; deg += 30) {
+  const th = deg * Math.PI / 180;
+  const [x, y] = polarToXY(cx, cy, maxR, th);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(x, y);
+  ctx.stroke();
+}
+
+  // sweep
+  if(currentAngle!=null){
+    const th = currentAngle*Math.PI/180;
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--sweep');
+    ctx.lineWidth = 2;
+    const [sx,sy] = polarToXY(cx,cy,maxR,th);
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(sx,sy); ctx.stroke();
+  }
+
+  // blips
+  const now = performance.now();
+  blips = blips.filter(b => now - b.time < BLIP_FADE_MS);
+  for(const b of blips){
+    const alpha = 1 - (now - b.time)/BLIP_FADE_MS;
+    ctx.fillStyle = `rgba(0,230,118,${alpha.toFixed(3)})`;
+    const [x,y] = polarToXY(cx,cy,b.rPx,b.angleRad);
+    ctx.beginPath(); ctx.arc(x,y,5,0,Math.PI*2); ctx.fill();
+  }
+
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+// Convert CSV line "angle,distance" to data
+function handleLine(line){
+  if(!line) return;
+  if(line.startsWith(headerPrefix)) return;
+
+  const parts = line.split(',');
+  if(parts.length < 2) return;
+  const ang = parseFloat(parts[0]);
+  const dist = parts[1]==="" ? NaN : parseFloat(parts[1]);
+
+  if(Number.isFinite(ang)) currentAngle = ang;
+  angleEl.textContent = Number.isFinite(ang) ? ang.toFixed(0) : '–';
+
+  const maxCm = Math.max(1, parseFloat(rangeEl.value)||400);
+  const maxR = Math.min(canvas.width, canvas.height)/2 * 0.92;
+
+  if(Number.isFinite(dist)){
+    currentDistance = dist;
+    distEl.textContent = dist.toFixed(1);
+    const rPx = Math.min(maxR, (dist/maxCm)*maxR);
+    const th = (ang*Math.PI/180);
+    blips.push({angleRad: th, rPx, time: performance.now()});
+  } else {
+    distEl.textContent = '–';
+  }
+}
+
+async function connect(){
+  if(!('serial' in navigator)){
+    alert('Web Serial not supported in this browser. Try Chrome or Edge on desktop.');
+    return;
+  }
+  try{
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate });
+    statusEl.textContent = 'connected';
+    connectBtn.disabled = true;
+    keepReading = true;
+
+    const decoder = new TextDecoderStream();
+    const inputDone = port.readable.pipeTo(decoder.writable);
+    const inputStream = decoder.readable;
+    reader = inputStream.getReader();
+
+    let buffer = '';
+    while (keepReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      let idx;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        handleLine(line);
+      }
+    }
+  } catch (e){
+    console.error(e);
+    statusEl.textContent = 'error';
+    connectBtn.disabled = false;
+  }
+}
+
+connectBtn.addEventListener('click', connect);
+window.addEventListener('beforeunload', async ()=>{
+  try {
+    keepReading = false;
+    await reader?.releaseLock();
+    await port?.close();
+  } catch(_) {}
+});
+</script>
+</body>
+</html>

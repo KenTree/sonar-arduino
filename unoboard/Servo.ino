@@ -15,7 +15,7 @@ const uint16_t MOVE_INTERVAL_MS = 10;   // servo speed
 const uint16_t PING_INTERVAL_MS = 25;   // how often to take a reading
 
 // --- Ultrasonic ---
-const uint32_t ECHO_TIMEOUT_US = 6000UL;  // ~1 m max; raise if you need more
+const uint32_t ECHO_TIMEOUT_US = 6000UL;  // ~1 m max; raise for more distance
 
 Servo myServo;
 int    angle        = 90;
@@ -24,13 +24,16 @@ uint32_t lastMoveMs = 0;
 uint32_t lastPingMs = 0;
 
 float readDistanceCM_fast() {
-  // trigger 10 µs pulse
+  // trigger 10 microsecond pulse
   digitalWrite(TRIG_PIN, LOW);  delayMicroseconds(2);
   digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
   // bounded blocking
   unsigned long dur = pulseIn(ECHO_PIN, HIGH, ECHO_TIMEOUT_US);
   if (!dur) return NAN;
+  // speed of sound is 34300 cm / s
+  // convert into centimeters per microsecond = 0.0343 cm / microsecond
+  // divided by 2 to account for distance there and back
   return (dur * 0.0343f) / 2.0f;
 }
 
